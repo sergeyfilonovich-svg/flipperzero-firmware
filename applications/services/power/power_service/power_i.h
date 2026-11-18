@@ -36,6 +36,12 @@ struct Power {
     bool is_otg_requested;
     uint8_t battery_level;
     uint8_t power_off_timeout;
+
+    /* Tracks physical input even when another application owns the screen. */
+    volatile uint32_t auto_off_last_input_tick;
+    bool auto_off_was_powered;
+    FuriPubSub* auto_off_input_pubsub;
+    FuriPubSubSubscription* auto_off_input_subscription;
 };
 
 typedef enum {
