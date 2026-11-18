@@ -5,11 +5,13 @@
 
 #include <update_util/update_operation.h>
 #include <notification/notification_messages.h>
+#include <input/input.h>
 
 #define TAG "Power"
 
 #define POWER_OFF_TIMEOUT_S  (90U)
 #define POWER_POLL_PERIOD_MS (1000UL)
+#define POWER_AUTO_OFF_TIMEOUT_MS (5UL * 60UL * 1000UL)
 
 #define POWER_VBUS_LOW_THRESHOLD   (4.0f)
 #define POWER_HEALTH_LOW_THRESHOLD (70U)
@@ -178,6 +180,45 @@ static void power_handle_shutdown(Power* power) {
     furi_halt("Disconnect USB for safe shutdown");
 }
 
+/* Called from the input service thread; aligned 32-bit tick writes are atomic on the MCU. */
+static void power_auto_off_input_callback(const void* message, void* context) {
+    furi_assert(context);
+    furi_assert(message);
+    Power* power = context;
+    const InputEvent* event = message;
+
+    if(event->sequence_source == INPUT_SEQUENCE_SOURCE_HARDWARE &&
+       (event->type == InputTypePress || event->type == InputTypeRepeat)) {
+        power->auto_off_last_input_tick = furi_get_tick();
+    }
+}
+
+/* Runs on the power service event loop, not on the input callback thread. */
+static void power_check_auto_off(Power* power) {
+    /* Also detect USB power when the battery is already charged. */
+    const bool external_power =
+        power->info.is_charging || (power->info.voltage_vbus >= POWER_VBUS_LOW_THRESHOLD);
+
+    if(external_power) {
+        power->auto_off_was_powered = true;
+        return;
+    }
+
+    /* Unplugging USB starts a fresh five-minute interval. */
+    if(power->auto_off_was_powered) {
+        power->auto_off_was_powered = false;
+        power->auto_off_last_input_tick = furi_get_tick();
+        return;
+    }
+
+    const uint32_t now = furi_get_tick();
+    if((uint32_t)(now - power->auto_off_last_input_tick) >=
+       furi_ms_to_ticks(POWER_AUTO_OFF_TIMEOUT_MS)) {
+        FURI_LOG_I(TAG, "Auto power off after five minutes without button activity");
+        power_handle_shutdown(power);
+    }
+}
+
 static void power_handle_reboot(PowerBootMode mode) {
     if(mode == PowerBootModeNormal) {
         update_operation_disarm();
@@ -262,6 +303,8 @@ static void power_tick_callback(void* context) {
     power_check_charging_state(power);
     // Check and notify about battery level change
     power_check_battery_level_change(power);
+    // Shut down on battery after five minutes without physical button activity.
+    power_check_auto_off(power);
     // Update battery view port
     if(need_refresh) {
         view_port_update(power->battery_view_port);
@@ -288,6 +331,9 @@ static Power* power_alloc(void) {
     // State initialization
     power->power_off_timeout = POWER_OFF_TIMEOUT_S;
     power->show_battery_low_warning = true;
+    power->auto_off_last_input_tick = furi_get_tick();
+    power->auto_off_was_powered =
+        furi_hal_power_get_usb_voltage() >= POWER_VBUS_LOW_THRESHOLD;
     // Gui
     Gui* gui = furi_record_open(RECORD_GUI);
 
@@ -309,7 +355,11 @@ static Power* power_alloc(void) {
         FuriEventLoopEventIn,
         power_message_callback,
         power);
-    furi_event_loop_tick_set(power->event_loop, 1000, power_tick_callback, power);
+    furi_event_loop_tick_set(power->event_loop, POWER_POLL_PERIOD_MS, power_tick_callback, power);
+
+    power->auto_off_input_pubsub = furi_record_open(RECORD_INPUT_EVENTS);
+    power->auto_off_input_subscription = furi_pubsub_subscribe(
+        power->auto_off_input_pubsub, power_auto_off_input_callback, power);
 
     return power;
 }

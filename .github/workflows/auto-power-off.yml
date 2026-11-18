@@ -1,0 +1,33 @@
+name: Build Flipper Auto Power Off
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'applications/services/power/**'
+      - '.github/workflows/auto-power-off.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  firmware:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout source and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Build firmware update for Flipper Zero
+        run: ./fbt COMPACT=1 DEBUG=0 TARGET=f7 updater_package
+
+      - name: Upload installable firmware package
+        uses: actions/upload-artifact@v4
+        with:
+          name: flipper-auto-power-off-update
+          path: dist/f7-*/*.tgz
+          if-no-files-found: error
+          retention-days: 14
